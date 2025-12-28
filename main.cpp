@@ -6,9 +6,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <netpacket/packet.h>
-#include <iostream>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
+
+#define port = 9009;
 
 void printInterfaces() {
 
@@ -27,17 +28,14 @@ void printInterfaces() {
 
         family = ifa->ifa_addr->sa_family;
 
-        /* Display interface name and family (including symbolic
-           form of the latter for the common families). */
-
         if (family == AF_PACKET) {
             const auto* ll = (const struct sockaddr_ll *)ifa->ifa_addr;
-            printf("%-8s MAC: ", ifa->ifa_name);  // Add this
+            printf("%-8s MAC: ", ifa->ifa_name);
             for (int i = 0; i < 6; i++) {
                 printf("%02x", ll->sll_addr[i]);
                 if (i < 5) printf(":");
             }
-            printf("\n");  // ADD THIS - newline after MAC
+            printf("\n");
         }
         else if (family == AF_INET || family == AF_INET6) {
             s = getnameinfo(ifa->ifa_addr,(family == AF_INET) ? sizeof(struct sockaddr_in) :sizeof(struct sockaddr_in6),host, NI_MAXHOST,NULL, 0, NI_NUMERICHOST);
@@ -49,32 +47,32 @@ void printInterfaces() {
             printf("%-8s IP: %s\n", ifa->ifa_name, host);
 
             if (ifa->ifa_netmask != NULL ) {
-                char netmask[NI_MAXHOST];  // Create a SEPARATE buffer for netmask
+                char netmask[NI_MAXHOST];
                 s = getnameinfo(ifa->ifa_netmask, sizeof(struct sockaddr_in), netmask, NI_MAXHOST,NULL, 0, NI_NUMERICHOST);
-                if (s == 0) {  // Check it succeeded
-                    printf(" Netmask: %s\n", netmask);
+                if (s == 0) {
+                    printf("         Netmask: %s\n", netmask);
                 }
             }
         }
     }
     freeifaddrs(ifaddr);
-
 }
 
 int main(int argc, char *argv[])
 {
+    printf("=== Initial network interface state ===\n");
     printInterfaces();
+    printf("\n=== Monitoring for network changes... ===\n\n");
 
     struct sockaddr_nl sa;
     const auto fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
 
     if (fd == -1) {
-        //fail
         perror("socket");
         exit(EXIT_FAILURE);
     }
     sa.nl_family = AF_NETLINK;
-    sa.nl_groups = RTMGRP_LINK | RTMGRP_IPV4_IFADDR;  // <-- This is subscribing!
+    sa.nl_groups = RTMGRP_LINK | RTMGRP_IPV4_IFADDR;
 
     const auto bindErr = bind(fd, (struct sockaddr*)&sa, sizeof(sa));
     if (bindErr == -1) {
@@ -103,22 +101,33 @@ int main(int argc, char *argv[])
         const auto bytesReceived = recvfrom(fd, buffer, sizeof(buffer), 0, NULL, NULL);
         if (bytesReceived == -1) {
             perror("recvfrom");
+            continue;
         }
         int len = bytesReceived;
         auto x = reinterpret_cast<nlmsghdr*>(buffer);
         while (NLMSG_OK(x, len)) {
-            if (x->nlmsg_type == RTM_NEWADDR ||
-                 x->nlmsg_type == RTM_DELADDR ||
-                 x->nlmsg_type == RTM_NEWLINK ||
-                 x->nlmsg_type == RTM_DELLINK) {
-
-                // #CLAUDE dont we need to read the message ?
+            if (x->nlmsg_type == RTM_NEWADDR) {
+                printf(">>> Event: IP address ADDED\n");
                 needsRefresh = true;
-                                                }
+            }
+            else if (x->nlmsg_type == RTM_DELADDR) {
+                printf(">>> Event: IP address REMOVED\n");
+                needsRefresh = true;
+            }
+            else if (x->nlmsg_type == RTM_NEWLINK) {
+                printf(">>> Event: Interface state CHANGED (up/down/modified)\n");
+                needsRefresh = true;
+            }
+            else if (x->nlmsg_type == RTM_DELLINK) {
+                printf(">>> Event: Interface DELETED\n");
+                needsRefresh = true;
+            }
             x = NLMSG_NEXT(x, len);
         }
         if (needsRefresh) {
+            printf("\n=== Updated network interface state ===\n");
             printInterfaces();
+            printf("\n=== Monitoring for network changes... ===\n\n");
         }
     }
     exit(EXIT_SUCCESS);
